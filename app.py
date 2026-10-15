@@ -129,7 +129,7 @@ def index():
 
 @app.post("/generate")
 async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-NanamiNeural")):
-    api_key = os.getenv("GEMINI_API_KEY", "AIzaSyAQ_AbBRN6LYNOEWhataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
+    api_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LYNOEwHataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q)
     client = genai.Client(api_key=api_key)
     
     system_instruction = f"""
