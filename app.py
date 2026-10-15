@@ -150,7 +150,7 @@ def index():
 
 @app.post("/generate")
 def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form(...)):
-    api_key = os.getenv("AQ.Ab8RN6LYNOEwHataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q)
+    api_key = os.getenv("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
     system_instruction = f"""
