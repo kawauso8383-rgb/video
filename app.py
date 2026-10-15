@@ -38,6 +38,7 @@ def index():
         .time-badge { background: #0284c7; color: #fff; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 13px; display: inline-block; margin-bottom: 10px; }
         .box { background: #0f172a; padding: 12px; border-radius: 8px; margin: 8px 0; font-size: 14px; }
         video { width: 100%; max-height: 420px; border-radius: 8px; margin-top: 12px; background: #000; }
+        .btn-seek { background: #2563eb; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; margin-top: 6px; }
       </style>
     </head>
     <body>
@@ -51,7 +52,7 @@ def index():
           <div id="fileInfo" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
 
           <label>② 切り抜きたい基準・テーマ</label>
-          <input type="text" id="focus" value="一番テンポが良く見応えがある場面を30〜60秒前後で">
+          <input type="text" id="focus" value="一番エモくて感情が高まるシーンを50秒前後で">
 
           <button onclick="analyzeClip()">AIで最適な切り抜き区間を判定する</button>
         </div>
@@ -62,34 +63,32 @@ def index():
 
       <script>
         let totalDuration = 0;
-        let videoBlobUrl = null;
+        let selectedFile = null;
 
         function loadDuration(e) {
-          const file = e.target.files[0];
-          if (!file) return;
-          videoBlobUrl = URL.createObjectURL(file);
+          selectedFile = e.target.files[0];
+          if (!selectedFile) return;
+
           const tempVideo = document.createElement('video');
           tempVideo.preload = 'metadata';
-          tempVideo.src = videoBlobUrl;
+          tempVideo.src = URL.createObjectURL(selectedFile);
           tempVideo.onloadedmetadata = function() {
-            window.URL.revokeObjectURL(tempVideo.src);
             totalDuration = tempVideo.duration;
             document.getElementById('fileInfo').innerText = `動画の長さ: ${Math.round(totalDuration)} 秒 読み込み完了`;
           };
         }
 
         async function analyzeClip() {
-          const fileInput = document.getElementById('videoFile');
           const focus = document.getElementById('focus').value;
-          if (!fileInput.files[0]) return alert('動画ファイルを選択してください');
-          if (totalDuration === 0) return alert('動画の長さを取得中です。1〜2秒待ってから押してください');
+          if (!selectedFile) return alert('動画ファイルを選択してください');
+          if (totalDuration === 0) return alert('動画の読み込み中です。少々お待ちください');
 
           document.getElementById('loading').style.display = 'block';
           document.getElementById('result').innerHTML = '';
 
           const form = new FormData();
           form.append('duration', totalDuration);
-          form.append('filename', fileInput.files[0].name);
+          form.append('filename', selectedFile.name);
           form.append('focus', focus);
 
           try {
@@ -108,13 +107,28 @@ def index():
                 <div style="font-size: 12px; color: #38bdf8; margin-top: 8px;">🔥 冒頭推奨テロップ</div>
                 <div class="box" style="font-weight: bold; color: #facc15;">${data.telop_text}</div>
 
-                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">🎬 指定区間のプレビュー確認</div>
-                <video id="previewVideo" controls src="${videoBlobUrl}#t=${data.start_time},${data.end_time}"></video>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">🎬 該当区間から再生</div>
+                <button class="btn-seek" onclick="jumpTo(${data.start_time})">▶ 開始位置 (${data.start_time}秒) から再生</button>
+                <video id="previewVideo" controls playsinline></video>
               </div>
             `;
+
+            const video = document.getElementById('previewVideo');
+            video.src = URL.createObjectURL(selectedFile);
+            video.onloadedmetadata = function() {
+              video.currentTime = data.start_time;
+            };
           } catch(e) {
             document.getElementById('loading').style.display = 'none';
             alert('解析エラー: ' + e);
+          }
+        }
+
+        function jumpTo(sec) {
+          const video = document.getElementById('previewVideo');
+          if (video) {
+            video.currentTime = sec;
+            video.play();
           }
         }
       </script>
