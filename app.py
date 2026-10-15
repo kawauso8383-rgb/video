@@ -129,14 +129,14 @@ def index():
 
 @app.post("/generate")
 async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-NanamiNeural")):
-   api_key = os.getenv("GEMINI_API_KEY", "AIzaSyAQ_AbBRN6LYNOEWhataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
-    client = genai.Client(api_key=api_key)    
+    api_key = os.getenv("GEMINI_API_KEY", "AIzaSyAQ_AbBRN6LYNOEWhataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
+    client = genai.Client(api_key=api_key)
+    
     system_instruction = f"""
     あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
     【画風・キャラ指示】: {style}
     ※ 上記特徴を崩さないよう全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
-    """
-    
+    """    
     response = client.models.generate_content(
         model="gemini-3.5-flash",
         contents=f"テーマ: {theme}",
