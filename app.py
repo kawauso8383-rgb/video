@@ -23,10 +23,7 @@ class VideoScript(BaseModel):
     title: str = Field(description="動画タイトル")
     scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
 
-# 自然な音声合成 (Edge-TTS)
-async def generate_voice(text: str, filename: str):
-    # ja-JP-NanamiNeural (落ち着いた女性), ja-JP-KeitaNeural (自然な男性)
-    voice = "ja-JP-NanamiNeural"
+async def generate_voice(text: str, filename: str, voice: str):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(filename)
 
@@ -45,11 +42,12 @@ def index():
         h1 { font-size: 20px; color: #38bdf8; margin-bottom: 16px; }
         .card { background: #1e293b; padding: 16px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
         label { display: block; margin-top: 12px; font-weight: bold; font-size: 13px; }
-        input { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }
+        input, select { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }
         button { background: #0284c7; color: #fff; border: none; padding: 14px; font-size: 15px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 16px; width: 100%; }
         .scene-card { background: #1e293b; border-left: 4px solid #38bdf8; padding: 14px; margin-bottom: 14px; border-radius: 0 8px 8px 0; }
         .prompt-box { background: #0f172a; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #a5f3fc; word-break: break-all; margin: 8px 0; }
-        .btn-copy { background: #334155; width: 100%; padding: 8px; font-size: 13px; margin-top: 6px; }
+        .btn-action { background: #334155; color: #fff; width: 100%; padding: 10px; font-size: 13px; margin-top: 6px; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; text-align: center; box-sizing: border-box; }
+        .btn-download { background: #047857; }
         #loading { display: none; color: #38bdf8; font-weight: bold; text-align: center; margin: 20px 0; }
         audio { width: 100%; margin: 8px 0; }
       </style>
@@ -59,15 +57,21 @@ def index():
         <h1>🎬 ショート動画 構成・音声ビルダー</h1>
         <div class="card">
           <label>① 動画のテーマ・アイデア</label>
-          <input type="text" id="theme" placeholder="例: 深夜のコインランドリーで飲む缶コーヒー">
+          <input type="text" id="theme" placeholder="例: 閉店間際のガソリンスタンド、静寂とオレンジの光">
           
           <label>② 画風・キャラクターの一貫性指示</label>
           <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
+
+          <label>③ ナレーションの声</label>
+          <select id="voice">
+            <option value="ja-JP-NanamiNeural">女性（Nanami / 落ち着いたアナウンサー風）</option>
+            <option value="ja-JP-KeitaNeural">男性（Keita / 自然で穏やかな語り）</option>
+          </select>
           
           <button onclick="generate()">構成・プロンプト・音声を生成する</button>
         </div>
 
-        <div id="loading">⚡ 高品質音声を生成中です（約10〜15秒）...</div>
+        <div id="loading">⚡ 生成中です（約10〜15秒）...</div>
         <div id="results"></div>
       </div>
 
@@ -75,6 +79,7 @@ def index():
         async function generate() {
           const theme = document.getElementById('theme').value;
           const style = document.getElementById('style').value;
+          const voice = document.getElementById('voice').value;
           if (!theme) return alert('テーマを入力してください');
 
           document.getElementById('loading').style.display = 'block';
@@ -83,6 +88,7 @@ def index():
           const form = new FormData();
           form.append('theme', theme);
           form.append('style', style);
+          form.append('voice', voice);
 
           try {
             const res = await fetch('/generate', { method: 'POST', body: form });
@@ -91,14 +97,16 @@ def index():
 
             let html = `<h2>${data.title}</h2>`;
             data.scenes.forEach(s => {
+              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}`;
               html += `
                 <div class="scene-card">
                   <h3>Cut ${s.cut_number}</h3>
                   <p><strong>🗣️ ナレーション:</strong> ${s.narration}</p>
-                  <audio controls src="/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}"></audio>
+                  <audio controls src="${audioUrl}"></audio>
+                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.mp3">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
                   <p><strong>🎬 構図:</strong> ${s.visual_description_ja}</p>
                   <div class="prompt-box" id="p_${s.cut_number}">${s.image_prompt_en}</div>
-                  <button class="btn-copy" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
+                  <button class="btn-action" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
                 </div>
               `;
             });
@@ -120,9 +128,8 @@ def index():
     """
 
 @app.post("/generate")
-async def run_generation(theme: str = Form(...), style: str = Form(...)):
-    # APIキーは環境変数があればそれを使い、なければ直接指定したキーを使用
-    api_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LYNOEwHataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
+async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-NanamiNeural")):
+    api_key = os.getenv("GEMINI_API_KEY", "AIzaSyAQ_AbBRN6LYNOEWhataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
     client = genai.Client(api_key=api_key)
     
     system_instruction = f"""
@@ -132,7 +139,7 @@ async def run_generation(theme: str = Form(...), style: str = Form(...)):
     """
     
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-3.0-flash",
         contents=f"テーマ: {theme}",
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -143,12 +150,11 @@ async def run_generation(theme: str = Form(...), style: str = Form(...)):
     )
     data = VideoScript.model_validate_json(response.text)
 
-    # 自然な音声（Edge-TTS）を並列生成
     tasks = []
     for scene in data.scenes:
         cut_name = f"cut_{scene.cut_number:02d}.mp3"
         path = os.path.join("output", cut_name)
-        tasks.append(generate_voice(scene.narration, path))
+        tasks.append(generate_voice(scene.narration, path, voice))
     
     await asyncio.gather(*tasks)
 
