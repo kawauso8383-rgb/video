@@ -21,7 +21,6 @@ class HighlightSection(BaseModel):
     reason: str = Field(description="ここを見どころとして選んだ理由")
 
 def crop_to_vertical(clip):
-    # 16:9 などの横長動画を中央基準で 9:16 の縦長にクロップ
     w, h = clip.size
     target_w = int(h * 9 / 16)
     if target_w < w:
@@ -125,7 +124,6 @@ async def clip_video(file: UploadFile = File(...), focus: str = Form(...)):
         api_key = os.getenv("GEMINI_API_KEY")
         client = genai.Client(api_key=api_key)
 
-        # 動画全体の長さから最適な切り抜き秒数を判断
         prompt = f"""
         総再生時間 {duration:.1f} 秒の動画です。
         【切り抜き基準】: {focus}
@@ -143,7 +141,6 @@ async def clip_video(file: UploadFile = File(...), focus: str = Form(...)):
         )
         data = HighlightSection.model_validate_json(response.text)
 
-        # 切り抜き & 9:16 クロップ処理
         subclip = clip.subclip(data.start_time, min(data.end_time, duration))
         vertical_clip = crop_to_vertical(subclip)
 
