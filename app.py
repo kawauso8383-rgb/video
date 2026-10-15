@@ -1,33 +1,33 @@
 import os
-import asyncio
-import edge_tts
-from fastapi import FastAPI, Form
+import shutil
+from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
+from moviepy.video.io.VideoFileClip import VideoFileClip
 
 app = FastAPI()
 
+os.makedirs("uploads", exist_ok=True)
 os.makedirs("output", exist_ok=True)
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
-class Scene(BaseModel):
-    cut_number: int = Field(description="カット番号 (1, 2, 3...)")
-    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒。読み間違えを防ぐため難解な熟語は避け、適度に読点『、』を入れて自然な間を作る）")
-    visual_description_ja: str = Field(description="シーンの映像説明（日本語）")
-    image_prompt_en: str = Field(description="画像生成AI用の英語プロンプト。末尾に --ar 9:16")
+class HighlightSection(BaseModel):
+    start_time: float = Field(description="切り抜き開始秒 (例: 12.5)")
+    end_time: float = Field(description="切り抜き終了秒 (例: 42.0)")
+    title: str = Field(description="切り抜き動画のタイトル・フック")
+    reason: str = Field(description="ここを見どころとして選んだ理由")
 
-class VideoScript(BaseModel):
-    title: str = Field(description="動画タイトル")
-    scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
-
-# Edge-TTS で自然な間とトーンを設定して生成
-async def generate_voice(text: str, filename: str, voice: str):
-    # rate='-10%' で少しゆっくり喋らせることで、エモさと自然な重厚感を出す
-    communicate = edge_tts.Communicate(text, voice, rate="-10%", pitch="-2Hz")
-    await communicate.save(filename)
+def crop_to_vertical(clip):
+    # 16:9 などの横長動画を中央基準で 9:16 の縦長にクロップ
+    w, h = clip.size
+    target_w = int(h * 9 / 16)
+    if target_w < w:
+        x_center = w / 2
+        return clip.crop(x1=x_center - target_w / 2, y1=0, x2=x_center + target_w / 2, y2=h)
+    return clip
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -37,128 +37,140 @@ def index():
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>ショート動画ジェネレーター</title>
+      <title>AI 動画切り抜きジェネレーター</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 { font-size: 20px; color: #38bdf8; margin-bottom: 16px; }
-        .card { background: #1e293b; padding: 16px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
-        label { display: block; margin-top: 12px; font-weight: bold; font-size: 13px; }
-        input, select { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }
-        button { background: #0284c7; color: #fff; border: none; padding: 14px; font-size: 15px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 16px; width: 100%; }
-        .scene-card { background: #1e293b; border-left: 4px solid #38bdf8; padding: 14px; margin-bottom: 14px; border-radius: 0 8px 8px 0; }
-        .prompt-box { background: #0f172a; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #a5f3fc; word-break: break-all; margin: 8px 0; }
-        .btn-action { background: #334155; color: #fff; width: 100%; padding: 10px; font-size: 13px; margin-top: 6px; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; text-align: center; box-sizing: border-box; }
-        .btn-download { background: #047857; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 16px; }
+        .container { max-width: 650px; margin: 0 auto; }
+        h1 { font-size: 20px; color: #38bdf8; margin-bottom: 4px; }
+        .subtitle { font-size: 13px; color: #94a3b8; margin-bottom: 20px; }
+        .card { background: #1e293b; padding: 18px; border-radius: 12px; border: 1px solid #334155; }
+        label { display: block; margin-top: 14px; font-weight: bold; font-size: 13px; }
+        label:first-of-type { margin-top: 0; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }
+        button { background: #0284c7; color: #fff; border: none; padding: 14px; font-size: 15px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 18px; width: 100%; }
         #loading { display: none; color: #38bdf8; font-weight: bold; text-align: center; margin: 20px 0; }
-        audio { width: 100%; margin: 8px 0; }
+        .result-box { background: #1e293b; padding: 16px; border-radius: 12px; border: 1px solid #38bdf8; margin-top: 20px; }
+        video { width: 100%; max-height: 480px; border-radius: 8px; margin-top: 10px; background: #000; }
+        .btn-download { display: block; text-align: center; background: #047857; color: #fff; padding: 12px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-top: 12px; }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>🎬 ショート動画 構成・音声ビルダー</h1>
+        <h1>✂️ AI ショート動画切り抜きツール</h1>
+        <div class="subtitle">元の動画から見どころを検出し、9:16縦型ショート動画を自動生成</div>
+        
         <div class="card">
-          <label>① 動画のテーマ・アイデア</label>
-          <input type="text" id="theme" placeholder="例: 閉店間際のガソリンスタンド、静寂とオレンジの光">
-          
-          <label>② 画風・キャラクターの一貫性指示</label>
-          <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
+          <label>① 動画ファイルを選択 (mp4 / mov)</label>
+          <input type="file" id="videoFile" accept="video/*">
 
-          <label>③ ナレーションの声質</label>
-          <select id="voice">
-            <option value="ja-JP-KeitaNeural">Keita（落ち着いた大人の男性声・語り向け）</option>
-            <option value="ja-JP-NanamiNeural">Nanami（自然で聞き取りやすい女性声）</option>
-            <option value="ja-JP-NaokiNeural">Naoki（爽やかな青年声）</option>
-          </select>
-          
-          <button onclick="generate()">構成・プロンプト・音声を生成する</button>
+          <label>② 切り抜きたい基準・注目ポイント</label>
+          <input type="text" id="focus" value="一番話が盛り上がっている場面、インパクトのあるシーンを30秒前後で">
+
+          <button onclick="processClip()">動画を解析して切り抜く</button>
         </div>
 
-        <div id="loading">⚡ 構成と音声を生成中です（約10秒）...</div>
-        <div id="results"></div>
+        <div id="loading">⚡ 動画を解析・切り抜き処理中です（約20〜40秒）...</div>
+        <div id="result"></div>
       </div>
 
       <script>
-        async function generate() {
-          const theme = document.getElementById('theme').value;
-          const style = document.getElementById('style').value;
-          const voice = document.getElementById('voice').value;
-          if (!theme) return alert('テーマを入力してください');
+        async function processClip() {
+          const fileInput = document.getElementById('videoFile');
+          const focus = document.getElementById('focus').value;
+          if (!fileInput.files[0]) return alert('動画ファイルを選択してください');
 
           document.getElementById('loading').style.display = 'block';
-          document.getElementById('results').innerHTML = '';
+          document.getElementById('result').innerHTML = '';
 
           const form = new FormData();
-          form.append('theme', theme);
-          form.append('style', style);
-          form.append('voice', voice);
+          form.append('file', fileInput.files[0]);
+          form.append('focus', focus);
 
           try {
-            const res = await fetch('/generate', { method: 'POST', body: form });
+            const res = await fetch('/clip', { method: 'POST', body: form });
             const data = await res.json();
             document.getElementById('loading').style.display = 'none';
 
-            let html = `<h2>${data.title}</h2>`;
-            data.scenes.forEach(s => {
-              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}`;
-              html += `
-                <div class="scene-card">
-                  <h3>Cut ${s.cut_number}</h3>
-                  <p><strong>🗣️ ナレーション:</strong> ${s.narration}</p>
-                  <audio controls src="${audioUrl}"></audio>
-                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.mp3">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
-                  <p><strong>🎬 構図:</strong> ${s.visual_description_ja}</p>
-                  <div class="prompt-box" id="p_${s.cut_number}">${s.image_prompt_en}</div>
-                  <button class="btn-action" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
-                </div>
-              `;
-            });
-            document.getElementById('results').innerHTML = html;
+            if (data.error) return alert('エラー: ' + data.error);
+
+            document.getElementById('result').innerHTML = `
+              <div class="result-box">
+                <h3 style="margin: 0; color: #38bdf8;">${data.title}</h3>
+                <p style="font-size: 13px; color: #94a3b8; margin: 6px 0;">区間: ${data.start_time}秒 〜 ${data.end_time}秒</p>
+                <p style="font-size: 14px;">${data.reason}</p>
+                <video controls src="${data.video_url}"></video>
+                <a class="btn-download" href="${data.video_url}" download="short_clip.mp4">📥 切り抜き動画を保存</a>
+              </div>
+            `;
           } catch(e) {
             document.getElementById('loading').style.display = 'none';
-            alert('エラーが発生しました: ' + e);
+            alert('処理に失敗しました: ' + e);
           }
-        }
-
-        function copyPrompt(id) {
-          const text = document.getElementById(id).innerText;
-          navigator.clipboard.writeText(text);
-          alert('コピーしました！');
         }
       </script>
     </body>
     </html>
     """
 
-@app.post("/generate")
-async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-KeitaNeural")):
-    api_key = os.getenv("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
-    
-    system_instruction = f"""
-    あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
-    【画風・キャラ指示】: {style}
-    ※ 上記特徴を全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
-    ※ ナレーション原稿の指示:
-      - 誤読を防ぐため、「静けさ（しずけさ）」のように読みが曖昧になりやすい言葉はひらがなや平易な表現にする。
-      - AIが早口や棒読みにならないよう、適度に読点（、）や三点リーダー（…）を入れて、感情のこもった「間」を作ること。
-    """
-    
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=f"テーマ: {theme}",
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            response_schema=VideoScript,
-            temperature=0.7,
-        ),
-    )
-    data = VideoScript.model_validate_json(response.text)
+@app.post("/clip")
+async def clip_video(file: UploadFile = File(...), focus: str = Form(...)):
+    save_path = os.path.join("uploads", file.filename)
+    with open(save_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    for scene in data.scenes:
-        cut_name = f"cut_{scene.cut_number:02d}.mp3"
-        path = os.path.join("output", cut_name)
-        await generate_voice(scene.narration, path, voice)
+    try:
+        clip = VideoFileClip(save_path)
+        duration = clip.duration
 
-    return data
+        api_key = os.getenv("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+
+        # 動画全体の長さから最適な切り抜き秒数を判断
+        prompt = f"""
+        総再生時間 {duration:.1f} 秒の動画です。
+        【切り抜き基準】: {focus}
+        動画全体の中から、ショート動画（20秒〜45秒程度）として最も見応えのある開始時間と終了時間を決定してください。
+        開始時間は 0 以上、終了時間は {duration:.1f} 以下にしてください。
+        """
+
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=HighlightSection,
+            ),
+        )
+        data = HighlightSection.model_validate_json(response.text)
+
+        # 切り抜き & 9:16 クロップ処理
+        subclip = clip.subclip(data.start_time, min(data.end_time, duration))
+        vertical_clip = crop_to_vertical(subclip)
+
+        out_name = f"clip_{int(data.start_time)}_{int(data.end_time)}.mp4"
+        out_path = os.path.join("output", out_name)
+        
+        vertical_clip.write_videofile(
+            out_path,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile="temp-audio.m4a",
+            remove_temp=True,
+            threads=2,
+            logger=None
+        )
+
+        clip.close()
+        subclip.close()
+        vertical_clip.close()
+
+        return {
+            "title": data.title,
+            "reason": data.reason,
+            "start_time": data.start_time,
+            "end_time": data.end_time,
+            "video_url": f"/output/{out_name}"
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
