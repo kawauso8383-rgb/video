@@ -139,7 +139,7 @@ async def run_generation(theme: str = Form(...), style: str = Form(...), voice: 
     """
     
     response = client.models.generate_content(
-        model="gemini-3.0-flash",
+        model="gemini-3.5-flash",
         contents=f"テーマ: {theme}",
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
