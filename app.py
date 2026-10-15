@@ -1,5 +1,6 @@
 import os
-import requests
+import asyncio
+import edge_tts
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +15,7 @@ app.mount("/output", StaticFiles(directory="output"), name="output")
 
 class Scene(BaseModel):
     cut_number: int = Field(description="カット番号 (1, 2, 3...)")
-    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒。エモく感情が乗るように）")
+    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒。読み間違えを防ぐため難解な熟語は避け、適度に読点『、』を入れて自然な間を作る）")
     visual_description_ja: str = Field(description="シーンの映像説明（日本語）")
     image_prompt_en: str = Field(description="画像生成AI用の英語プロンプト。末尾に --ar 9:16")
 
@@ -22,31 +23,11 @@ class VideoScript(BaseModel):
     title: str = Field(description="動画タイトル")
     scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
 
-# VOICEVOX Web API を使った自然な日本語音声生成
-def generate_voicevox_audio(text: str, filename: str, speaker_id: int):
-    api_url = "https://voicevox.su-shiki.com/api/voicevox"
-    params = {
-        "text": text,
-        "speaker": speaker_id
-    }
-    response = requests.post(f"{api_url}/audio-query", params=params)
-    if response.status_code != 200:
-        raise Exception(f"Voicevox query error: {response.text}")
-    
-    query_data = response.json()
-    # 落ち着いた語り口にするため話速をわずかに調整 (0.95倍)
-    query_data["speedScale"] = 0.95
-    
-    synth_res = requests.post(
-        f"{api_url}/synthesis",
-        params={"speaker": speaker_id},
-        json=query_data
-    )
-    if synth_res.status_code == 200:
-        with open(filename, "wb") as f:
-            f.write(synth_res.content)
-    else:
-        raise Exception(f"Voicevox synthesis error: {synth_res.text}")
+# Edge-TTS で自然な間とトーンを設定して生成
+async def generate_voice(text: str, filename: str, voice: str):
+    # rate='-10%' で少しゆっくり喋らせることで、エモさと自然な重厚感を出す
+    communicate = edge_tts.Communicate(text, voice, rate="-10%", pitch="-2Hz")
+    await communicate.save(filename)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -83,18 +64,17 @@ def index():
           <label>② 画風・キャラクターの一貫性指示</label>
           <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
 
-          <label>③ ナレーションの声質（VOICEVOX）</label>
+          <label>③ ナレーションの声質</label>
           <select id="voice">
-            <option value="13">青山龍星（渋く深みのある大人のナレーション声・イチオシ）</option>
-            <option value="2">四国めたん（落ち着いた明瞭な女性声）</option>
-            <option value="11">玄野武宏（穏やかな青年・解説風）</option>
-            <option value="9">波音リツ（少し低めのクールな女性声）</option>
+            <option value="ja-JP-KeitaNeural">Keita（落ち着いた大人の男性声・語り向け）</option>
+            <option value="ja-JP-NanamiNeural">Nanami（自然で聞き取りやすい女性声）</option>
+            <option value="ja-JP-NaokiNeural">Naoki（爽やかな青年声）</option>
           </select>
           
           <button onclick="generate()">構成・プロンプト・音声を生成する</button>
         </div>
 
-        <div id="loading">⚡ 日本語音声を生成中です（約10〜15秒）...</div>
+        <div id="loading">⚡ 構成と音声を生成中です（約10秒）...</div>
         <div id="results"></div>
       </div>
 
@@ -120,13 +100,13 @@ def index():
 
             let html = `<h2>${data.title}</h2>`;
             data.scenes.forEach(s => {
-              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.wav?t=${Date.now()}`;
+              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}`;
               html += `
                 <div class="scene-card">
                   <h3>Cut ${s.cut_number}</h3>
                   <p><strong>🗣️ ナレーション:</strong> ${s.narration}</p>
                   <audio controls src="${audioUrl}"></audio>
-                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.wav">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
+                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.mp3">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
                   <p><strong>🎬 構図:</strong> ${s.visual_description_ja}</p>
                   <div class="prompt-box" id="p_${s.cut_number}">${s.image_prompt_en}</div>
                   <button class="btn-action" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
@@ -151,7 +131,7 @@ def index():
     """
 
 @app.post("/generate")
-def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("13")):
+async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-KeitaNeural")):
     api_key = os.getenv("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
@@ -159,7 +139,9 @@ def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = 
     あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
     【画風・キャラ指示】: {style}
     ※ 上記特徴を全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
-    ※ ナレーションは短く簡潔に、聞き取りやすい言葉遣いにしてください。
+    ※ ナレーション原稿の指示:
+      - 誤読を防ぐため、「静けさ（しずけさ）」のように読みが曖昧になりやすい言葉はひらがなや平易な表現にする。
+      - AIが早口や棒読みにならないよう、適度に読点（、）や三点リーダー（…）を入れて、感情のこもった「間」を作ること。
     """
     
     response = client.models.generate_content(
@@ -175,8 +157,8 @@ def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = 
     data = VideoScript.model_validate_json(response.text)
 
     for scene in data.scenes:
-        cut_name = f"cut_{scene.cut_number:02d}.wav"
+        cut_name = f"cut_{scene.cut_number:02d}.mp3"
         path = os.path.join("output", cut_name)
-        generate_voicevox_audio(scene.narration, path, int(voice))
+        await generate_voice(scene.narration, path, voice)
 
     return data
