@@ -1,0 +1,155 @@
+import os
+import asyncio
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from google import genai
+from google.genai import types
+import edge_tts
+from pydantic import BaseModel, Field
+
+app = FastAPI()
+
+os.makedirs("output", exist_ok=True)
+app.mount("/output", StaticFiles(directory="output"), name="output")
+
+class Scene(BaseModel):
+    cut_number: int = Field(description="カット番号 (1, 2, 3...)")
+    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒）")
+    visual_description_ja: str = Field(description="シーンの映像説明（日本語）")
+    image_prompt_en: str = Field(description="画像生成AI用の英語プロンプト。末尾に --ar 9:16")
+
+class VideoScript(BaseModel):
+    title: str = Field(description="動画タイトル")
+    scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
+
+# 自然な音声合成 (Edge-TTS)
+async def generate_voice(text: str, filename: str):
+    # ja-JP-NanamiNeural (落ち着いた女性), ja-JP-KeitaNeural (自然な男性)
+    voice = "ja-JP-NanamiNeural"
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(filename)
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return """
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>ショート動画ジェネレーター</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { font-size: 20px; color: #38bdf8; margin-bottom: 16px; }
+        .card { background: #1e293b; padding: 16px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
+        label { display: block; margin-top: 12px; font-weight: bold; font-size: 13px; }
+        input { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }
+        button { background: #0284c7; color: #fff; border: none; padding: 14px; font-size: 15px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 16px; width: 100%; }
+        .scene-card { background: #1e293b; border-left: 4px solid #38bdf8; padding: 14px; margin-bottom: 14px; border-radius: 0 8px 8px 0; }
+        .prompt-box { background: #0f172a; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #a5f3fc; word-break: break-all; margin: 8px 0; }
+        .btn-copy { background: #334155; width: 100%; padding: 8px; font-size: 13px; margin-top: 6px; }
+        #loading { display: none; color: #38bdf8; font-weight: bold; text-align: center; margin: 20px 0; }
+        audio { width: 100%; margin: 8px 0; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>🎬 ショート動画 構成・音声ビルダー</h1>
+        <div class="card">
+          <label>① 動画のテーマ・アイデア</label>
+          <input type="text" id="theme" placeholder="例: 深夜のコインランドリーで飲む缶コーヒー">
+          
+          <label>② 画風・キャラクターの一貫性指示</label>
+          <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
+          
+          <button onclick="generate()">構成・プロンプト・音声を生成する</button>
+        </div>
+
+        <div id="loading">⚡ 高品質音声を生成中です（約10〜15秒）...</div>
+        <div id="results"></div>
+      </div>
+
+      <script>
+        async function generate() {
+          const theme = document.getElementById('theme').value;
+          const style = document.getElementById('style').value;
+          if (!theme) return alert('テーマを入力してください');
+
+          document.getElementById('loading').style.display = 'block';
+          document.getElementById('results').innerHTML = '';
+
+          const form = new FormData();
+          form.append('theme', theme);
+          form.append('style', style);
+
+          try {
+            const res = await fetch('/generate', { method: 'POST', body: form });
+            const data = await res.json();
+            document.getElementById('loading').style.display = 'none';
+
+            let html = `<h2>${data.title}</h2>`;
+            data.scenes.forEach(s => {
+              html += `
+                <div class="scene-card">
+                  <h3>Cut ${s.cut_number}</h3>
+                  <p><strong>🗣️ ナレーション:</strong> ${s.narration}</p>
+                  <audio controls src="/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}"></audio>
+                  <p><strong>🎬 構図:</strong> ${s.visual_description_ja}</p>
+                  <div class="prompt-box" id="p_${s.cut_number}">${s.image_prompt_en}</div>
+                  <button class="btn-copy" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
+                </div>
+              `;
+            });
+            document.getElementById('results').innerHTML = html;
+          } catch(e) {
+            document.getElementById('loading').style.display = 'none';
+            alert('エラーが発生しました: ' + e);
+          }
+        }
+
+        function copyPrompt(id) {
+          const text = document.getElementById(id).innerText;
+          navigator.clipboard.writeText(text);
+          alert('コピーしました！');
+        }
+      </script>
+    </body>
+    </html>
+    """
+
+@app.post("/generate")
+async def run_generation(theme: str = Form(...), style: str = Form(...)):
+    # APIキーは環境変数があればそれを使い、なければ直接指定したキーを使用
+    api_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LYNOEwHataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
+    client = genai.Client(api_key=api_key)
+    
+    system_instruction = f"""
+    あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
+    【画風・キャラ指示】: {style}
+    ※ 上記特徴を崩さないよう全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
+    """
+    
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=f"テーマ: {theme}",
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=VideoScript,
+            temperature=0.7,
+        ),
+    )
+    data = VideoScript.model_validate_json(response.text)
+
+    # 自然な音声（Edge-TTS）を並列生成
+    tasks = []
+    for scene in data.scenes:
+        cut_name = f"cut_{scene.cut_number:02d}.mp3"
+        path = os.path.join("output", cut_name)
+        tasks.append(generate_voice(scene.narration, path))
+    
+    await asyncio.gather(*tasks)
+
+    return data
