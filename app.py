@@ -1,11 +1,10 @@
 import os
-import asyncio
+import requests
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
-import edge_tts
 from pydantic import BaseModel, Field
 
 app = FastAPI()
@@ -15,7 +14,7 @@ app.mount("/output", StaticFiles(directory="output"), name="output")
 
 class Scene(BaseModel):
     cut_number: int = Field(description="カット番号 (1, 2, 3...)")
-    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒）")
+    narration: str = Field(description="ナレーション原稿（日本語・3〜5秒。エモく感情が乗るように）")
     visual_description_ja: str = Field(description="シーンの映像説明（日本語）")
     image_prompt_en: str = Field(description="画像生成AI用の英語プロンプト。末尾に --ar 9:16")
 
@@ -23,9 +22,30 @@ class VideoScript(BaseModel):
     title: str = Field(description="動画タイトル")
     scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
 
-async def generate_voice(text: str, filename: str, voice: str):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(filename)
+def generate_elevenlabs_voice(text: str, filename: str, voice_id: str):
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    data = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.8,
+            "style": 0.35,
+            "use_speaker_boost": True
+        }
+    }
+    response = requests.post(url, json=data, headers=headers)
+    if response.status_code == 200:
+        with open(filename, "wb") as f:
+            f.write(response.content)
+    else:
+        raise Exception(f"ElevenLabs Error: {response.text}")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -62,16 +82,17 @@ def index():
           <label>② 画風・キャラクターの一貫性指示</label>
           <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
 
-          <label>③ ナレーションの声</label>
+          <label>③ ナレーションの声質（ElevenLabs）</label>
           <select id="voice">
-            <option value="ja-JP-NanamiNeural">女性（Nanami / 落ち着いたアナウンサー風）</option>
-            <option value="ja-JP-KeitaNeural">男性（Keita / 自然で穏やかな語り）</option>
+            <option value="pNInz6obpgDQGcFmaJgB">Adam（低音・落ち着いた大人の語り）</option>
+            <option value="21m00Tcm4TlvDq8ikWAM">Rachel（自然で透明感のある女性声）</option>
+            <option value="ErXwobaYiN019PkySvjV">Antoni（穏やかでストーリーテラー向きの青年）</option>
           </select>
           
           <button onclick="generate()">構成・プロンプト・音声を生成する</button>
         </div>
 
-        <div id="loading">⚡ 生成中です（約10〜15秒）...</div>
+        <div id="loading">⚡ ElevenLabsで高品質な音声を生成中です（約15秒）...</div>
         <div id="results"></div>
       </div>
 
@@ -128,15 +149,17 @@ def index():
     """
 
 @app.post("/generate")
-async def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("ja-JP-NanamiNeural")):
-    api_key = os.getenv("GEMINI_API_KEY", "AIzaSyAQ_AbBRN6LYNOEWhataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q")
+def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form(...)):
+    api_key = os.getenv("AQ.Ab8RN6LYNOEwHataKQ9zpncQiKeMvio8c6sJ9fdpNNk897s54Q)
     client = genai.Client(api_key=api_key)
     
     system_instruction = f"""
     あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
+    ナレーション原稿は機械的な棒読みにならないよう、人間が自然に感情を込めて語りかけるような言葉選び・息継ぎにしてください。
     【画風・キャラ指示】: {style}
-    ※ 上記特徴を崩さないよう全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
-    """    
+    ※ 上記特徴を全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
+    """
+    
     response = client.models.generate_content(
         model="gemini-3.5-flash",
         contents=f"テーマ: {theme}",
@@ -149,12 +172,9 @@ async def run_generation(theme: str = Form(...), style: str = Form(...), voice: 
     )
     data = VideoScript.model_validate_json(response.text)
 
-    tasks = []
     for scene in data.scenes:
         cut_name = f"cut_{scene.cut_number:02d}.mp3"
         path = os.path.join("output", cut_name)
-        tasks.append(generate_voice(scene.narration, path, voice))
-    
-    await asyncio.gather(*tasks)
+        generate_elevenlabs_voice(scene.narration, path, voice)
 
     return data
