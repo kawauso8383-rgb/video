@@ -1,18 +1,20 @@
 import os
-from fastapi import FastAPI, Form
+import shutil
+from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.responses import HTMLResponse
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
 app = FastAPI()
+os.makedirs("temp_uploads", exist_ok=True)
 
 class HighlightSection(BaseModel):
-    title: str = Field(description="ショート動画のフックになるタイトル案")
-    start_time: float = Field(description="切り抜き開始秒 (例: 15.0)")
-    end_time: float = Field(description="切り抜き終了秒 (例: 45.0)")
-    hook_reason: str = Field(description="ここを切り抜くべき理由・見どころ解説")
-    telop_text: str = Field(description="画面冒頭に表示すべきおすすめテロップ文")
+    title: str = Field(description="動画の核となるショート動画用タイトル")
+    start_time: float = Field(description="最も盛り上がる開始秒")
+    end_time: float = Field(description="切り抜き終了秒（start_timeから20〜50秒以内）")
+    hook_reason: str = Field(description="映像や音声の具体的な内容を踏まえた見どころ理由")
+    telop_text: str = Field(description="画面冒頭に表示すべきおすすめテロップ")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -22,7 +24,7 @@ def index():
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>ショート動画クリッパー</title>
+      <title>AI動画切り抜きアナライザー</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 16px; }
         .container { max-width: 600px; margin: 0 auto; padding-bottom: 50px; }
@@ -38,85 +40,91 @@ def index():
         .time-badge { background: #0284c7; color: #fff; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 13px; display: inline-block; margin-bottom: 10px; }
         .box { background: #0f172a; padding: 12px; border-radius: 8px; margin: 8px 0; font-size: 14px; }
         video { width: 100%; max-height: 420px; border-radius: 8px; margin-top: 12px; background: #000; }
-        .btn-seek { background: #2563eb; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; margin-top: 6px; }
+        .btn-seek { background: #2563eb; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-weight: bold; cursor: pointer; margin-top: 6px; width: 100%; }
       </style>
     </head>
     <body>
       <div class="container">
         <h1>✂️ AI ショート動画切り抜きアナライザー</h1>
-        <div class="subtitle">動画を選択すると、秒数を自動計測してAIがバズる区間をピンポイント判定</div>
+        <div class="subtitle">Geminiが映像と音声を直接解析し、真の見どころ区間を抽出</div>
 
         <div class="card">
-          <label>① 動画ファイルを選択 (mp4 / mov)</label>
-          <input type="file" id="videoFile" accept="video/*" onchange="loadDuration(event)">
+          <label>① 解析する動画ファイル (mp4 / mov)</label>
+          <input type="file" id="videoFile" accept="video/*" onchange="onFileChange(event)">
           <div id="fileInfo" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
 
           <label>② 切り抜きたい基準・テーマ</label>
-          <input type="text" id="focus" value="一番エモくて感情が高まるシーンを50秒前後で">
+          <input type="text" id="focus" value="一番エモく感情が動くシーン、印象的な瞬間を30〜50秒で">
 
-          <button onclick="analyzeClip()">AIで最適な切り抜き区間を判定する</button>
+          <button onclick="analyzeVideo()">映像を直接AI解析して切り抜く</button>
         </div>
 
-        <div id="loading">⚡ Geminiが最適なカット区間を算出中...</div>
+        <div id="loading">⚡ Geminiが映像と音声の内容を直接解析中（約20〜30秒）...</div>
         <div id="result"></div>
       </div>
 
       <script>
-        let totalDuration = 0;
         let selectedFile = null;
+        let clipStart = 0;
+        let clipEnd = 0;
 
-        function loadDuration(e) {
+        function onFileChange(e) {
           selectedFile = e.target.files[0];
           if (!selectedFile) return;
-
-          const tempVideo = document.createElement('video');
-          tempVideo.preload = 'metadata';
-          tempVideo.src = URL.createObjectURL(selectedFile);
-          tempVideo.onloadedmetadata = function() {
-            totalDuration = tempVideo.duration;
-            document.getElementById('fileInfo').innerText = `動画の長さ: ${Math.round(totalDuration)} 秒 読み込み完了`;
-          };
+          document.getElementById('fileInfo').innerText = `ファイル選択: ${selectedFile.name} (${Math.round(selectedFile.size / 1024 / 1024)} MB)`;
         }
 
-        async function analyzeClip() {
+        async function analyzeVideo() {
           const focus = document.getElementById('focus').value;
           if (!selectedFile) return alert('動画ファイルを選択してください');
-          if (totalDuration === 0) return alert('動画の読み込み中です。少々お待ちください');
 
           document.getElementById('loading').style.display = 'block';
           document.getElementById('result').innerHTML = '';
 
           const form = new FormData();
-          form.append('duration', totalDuration);
-          form.append('filename', selectedFile.name);
+          form.append('file', selectedFile);
           form.append('focus', focus);
 
           try {
-            const res = await fetch('/analyze', { method: 'POST', body: form });
+            const res = await fetch('/analyze_video', { method: 'POST', body: form });
             const data = await res.json();
             document.getElementById('loading').style.display = 'none';
 
+            if (data.error) return alert('エラー: ' + data.error);
+
+            clipStart = data.start_time;
+            clipEnd = data.end_time;
+
             document.getElementById('result').innerHTML = `
               <div class="result-card">
-                <div class="time-badge">⏱ 切り抜き区間: ${data.start_time}秒 〜 ${data.end_time}秒 (尺: ${Math.round(data.end_time - data.start_time)}秒)</div>
+                <div class="time-badge">⏱ 切り抜き区間: ${clipStart}秒 〜 ${clipEnd}秒 (尺: ${Math.round(clipEnd - clipStart)}秒)</div>
                 <h3 style="margin: 6px 0; color: #f8fafc;">${data.title}</h3>
                 
-                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">💡 見どころ解説</div>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">💡 AI解析による選定理由</div>
                 <div class="box">${data.hook_reason}</div>
 
                 <div style="font-size: 12px; color: #38bdf8; margin-top: 8px;">🔥 冒頭推奨テロップ</div>
                 <div class="box" style="font-weight: bold; color: #facc15;">${data.telop_text}</div>
 
-                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">🎬 該当区間から再生</div>
-                <button class="btn-seek" onclick="jumpTo(${data.start_time})">▶ 開始位置 (${data.start_time}秒) から再生</button>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">🎬 切り抜きプレビュー（区間内のみループ再生）</div>
+                <button class="btn-seek" onclick="playClipRange()">▶ 切り抜き区間（${clipStart}秒〜${clipEnd}秒）を再生</button>
                 <video id="previewVideo" controls playsinline></video>
               </div>
             `;
 
             const video = document.getElementById('previewVideo');
             video.src = URL.createObjectURL(selectedFile);
+            
+            // 指定の終了秒数に来たら自動で停止（または開始秒に戻す）
+            video.ontimeupdate = function() {
+              if (video.currentTime >= clipEnd) {
+                video.pause();
+                video.currentTime = clipStart;
+              }
+            };
+
             video.onloadedmetadata = function() {
-              video.currentTime = data.start_time;
+              video.currentTime = clipStart;
             };
           } catch(e) {
             document.getElementById('loading').style.display = 'none';
@@ -124,10 +132,10 @@ def index():
           }
         }
 
-        function jumpTo(sec) {
+        function playClipRange() {
           const video = document.getElementById('previewVideo');
           if (video) {
-            video.currentTime = sec;
+            video.currentTime = clipStart;
             video.play();
           }
         }
@@ -136,29 +144,46 @@ def index():
     </html>
     """
 
-@app.post("/analyze")
-def analyze(duration: float = Form(...), filename: str = Form(...), focus: str = Form(...)):
-    api_key = os.getenv("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+@app.post("/analyze_video")
+async def analyze_video(file: UploadFile = File(...), focus: str = Form(...)):
+    local_path = os.path.join("temp_uploads", file.filename)
+    with open(local_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    prompt = f"""
-    動画ファイル名: {filename}
-    動画の総尺: {duration:.1f} 秒
-    ユーザーの切り抜き要望: {focus}
+    try:
+        api_key = os.getenv("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
 
-    この動画をTikTokやYouTube Shortsで最も伸びるショート動画として切り抜くための設計をしてください。
-    - start_time は 0 以上、end_time は {duration:.1f} 以下。
-    - 尺（end_time - start_time）は20秒〜60秒以内に収めること。
-    - 視聴者の離脱を防ぐための「冒頭テロップ文（telop_text）」も考案すること。
-    """
+        # Gemini API に動画ファイルを直接アップロードしてマルチモーダル認識
+        uploaded_video = client.files.upload(file=local_path)
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=HighlightSection,
-            temperature=0.7,
-        ),
-    )
-    return HighlightSection.model_validate_json(response.text)
+        prompt = f"""
+        添付された動画ファイルの内容（映像、登場人物の感情・表情、音声やセリフ）を詳細に解析してください。
+        【切り抜き基準】: {focus}
+
+        動画全体の中から、視聴者の興味を引きつける最も価値の高い区間（20秒〜50秒以内）をピンポイントで特定してください。
+        - 映像と音声の内容に即した具体的な秒数（start_time, end_time）を出力すること。単に動画の最後を指定してはいけません。
+        - 視聴離脱を防ぐためのテロップ案（telop_text）も具体的に提示すること。
+        """
+
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=[uploaded_video, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=HighlightSection,
+                temperature=0.4,
+            ),
+        )
+
+        # アップロードした一時ファイルをGemini側から削除
+        client.files.delete(name=uploaded_video.name)
+        if os.path.exists(local_path):
+            os.remove(local_path)
+
+        return HighlightSection.model_validate_json(response.text)
+
+    except Exception as e:
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        return {"error": str(e)}
