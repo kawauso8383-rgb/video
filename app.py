@@ -34,9 +34,9 @@ def generate_elevenlabs_voice(text: str, filename: str, voice_id: str):
         "text": text,
         "model_id": "eleven_multilingual_v2",
         "voice_settings": {
-            "stability": 0.45,
-            "similarity_boost": 0.8,
-            "style": 0.35,
+            "stability": 0.65,        # 安定性を少し上げてイントネーションを整える
+            "similarity_boost": 0.85,
+            "style": 0.0,             # スタイルを0に近づけると日本語の破綻が激減する
             "use_speaker_boost": True
         }
     }
@@ -82,13 +82,12 @@ def index():
           <label>② 画風・キャラクターの一貫性指示</label>
           <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
 
-          <label>③ ナレーションの声質（ElevenLabs）</label>
+         <label>③ ナレーションの声質（ElevenLabs 日本語対応）</label>
           <select id="voice">
-            <option value="pNInz6obpgDQGcFmaJgB">Adam（低音・落ち着いた大人の語り）</option>
-            <option value="21m00Tcm4TlvDq8ikWAM">Rachel（自然で透明感のある女性声）</option>
-            <option value="ErXwobaYiN019PkySvjV">Antoni（穏やかでストーリーテラー向きの青年）</option>
-          </select>
-          
+            <option value="TX3LPaxmHKxFdv7VOQHJ">落ち着いた男性ナレーション（Liam）</option>
+            <option value="EXAVITQu4vr4xnSDxMaL">自然で透き通る女性声（Sarah）</option>
+            <option value="FGY2WhTYpPnrIDTdsKH5">優しく語りかける女性声（Laura）</option>
+          </select>          
           <button onclick="generate()">構成・プロンプト・音声を生成する</button>
         </div>
 
