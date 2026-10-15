@@ -22,30 +22,31 @@ class VideoScript(BaseModel):
     title: str = Field(description="動画タイトル")
     scenes: list[Scene] = Field(description="シーンリスト（5〜6カット）")
 
-def generate_elevenlabs_voice(text: str, filename: str, voice_id: str):
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": api_key,
-    }
-    data = {
+# VOICEVOX Web API を使った自然な日本語音声生成
+def generate_voicevox_audio(text: str, filename: str, speaker_id: int):
+    api_url = "https://voicevox.su-shiki.com/api/voicevox"
+    params = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.65,        # 安定性を少し上げてイントネーションを整える
-            "similarity_boost": 0.85,
-            "style": 0.0,             # スタイルを0に近づけると日本語の破綻が激減する
-            "use_speaker_boost": True
-        }
+        "speaker": speaker_id
     }
-    response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
+    response = requests.post(f"{api_url}/audio-query", params=params)
+    if response.status_code != 200:
+        raise Exception(f"Voicevox query error: {response.text}")
+    
+    query_data = response.json()
+    # 落ち着いた語り口にするため話速をわずかに調整 (0.95倍)
+    query_data["speedScale"] = 0.95
+    
+    synth_res = requests.post(
+        f"{api_url}/synthesis",
+        params={"speaker": speaker_id},
+        json=query_data
+    )
+    if synth_res.status_code == 200:
         with open(filename, "wb") as f:
-            f.write(response.content)
+            f.write(synth_res.content)
     else:
-        raise Exception(f"ElevenLabs Error: {response.text}")
+        raise Exception(f"Voicevox synthesis error: {synth_res.text}")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -82,16 +83,18 @@ def index():
           <label>② 画風・キャラクターの一貫性指示</label>
           <input type="text" id="style" value="アニメ調、新海誠風の光と影、黒髪ショートヘアで青いパーカーの青年">
 
-         <label>③ ナレーションの声質（ElevenLabs 日本語対応）</label>
+          <label>③ ナレーションの声質（VOICEVOX）</label>
           <select id="voice">
-            <option value="TX3LPaxmHKxFdv7VOQHJ">落ち着いた男性ナレーション（Liam）</option>
-            <option value="EXAVITQu4vr4xnSDxMaL">自然で透き通る女性声（Sarah）</option>
-            <option value="FGY2WhTYpPnrIDTdsKH5">優しく語りかける女性声（Laura）</option>
-          </select>          
+            <option value="13">青山龍星（渋く深みのある大人のナレーション声・イチオシ）</option>
+            <option value="2">四国めたん（落ち着いた明瞭な女性声）</option>
+            <option value="11">玄野武宏（穏やかな青年・解説風）</option>
+            <option value="9">波音リツ（少し低めのクールな女性声）</option>
+          </select>
+          
           <button onclick="generate()">構成・プロンプト・音声を生成する</button>
         </div>
 
-        <div id="loading">⚡ ElevenLabsで高品質な音声を生成中です（約15秒）...</div>
+        <div id="loading">⚡ 日本語音声を生成中です（約10〜15秒）...</div>
         <div id="results"></div>
       </div>
 
@@ -117,13 +120,13 @@ def index():
 
             let html = `<h2>${data.title}</h2>`;
             data.scenes.forEach(s => {
-              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.mp3?t=${Date.now()}`;
+              const audioUrl = `/output/cut_${String(s.cut_number).padStart(2, '0')}.wav?t=${Date.now()}`;
               html += `
                 <div class="scene-card">
                   <h3>Cut ${s.cut_number}</h3>
                   <p><strong>🗣️ ナレーション:</strong> ${s.narration}</p>
                   <audio controls src="${audioUrl}"></audio>
-                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.mp3">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
+                  <a class="btn-action btn-download" href="${audioUrl}" download="cut_${String(s.cut_number).padStart(2, '0')}.wav">📥 音声（Cut ${s.cut_number}）をダウンロード</a>
                   <p><strong>🎬 構図:</strong> ${s.visual_description_ja}</p>
                   <div class="prompt-box" id="p_${s.cut_number}">${s.image_prompt_en}</div>
                   <button class="btn-action" onclick="copyPrompt('p_${s.cut_number}')">プロンプトをコピー</button>
@@ -148,15 +151,15 @@ def index():
     """
 
 @app.post("/generate")
-def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form(...)):
+def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = Form("13")):
     api_key = os.getenv("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
     system_instruction = f"""
     あなたはショート動画ディレクターです。テンポの良いショート動画（30秒前後・5〜6カット）の構成を作成してください。
-    ナレーション原稿は機械的な棒読みにならないよう、人間が自然に感情を込めて語りかけるような言葉選び・息継ぎにしてください。
     【画風・キャラ指示】: {style}
     ※ 上記特徴を全カットの image_prompt_en に含め、末尾に --ar 9:16 を付けてください。
+    ※ ナレーションは短く簡潔に、聞き取りやすい言葉遣いにしてください。
     """
     
     response = client.models.generate_content(
@@ -172,8 +175,8 @@ def run_generation(theme: str = Form(...), style: str = Form(...), voice: str = 
     data = VideoScript.model_validate_json(response.text)
 
     for scene in data.scenes:
-        cut_name = f"cut_{scene.cut_number:02d}.mp3"
+        cut_name = f"cut_{scene.cut_number:02d}.wav"
         path = os.path.join("output", cut_name)
-        generate_elevenlabs_voice(scene.narration, path, voice)
+        generate_voicevox_audio(scene.narration, path, int(voice))
 
     return data
